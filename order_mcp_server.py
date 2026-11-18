@@ -1,49 +1,12 @@
+
 import re
+import sqlite3
 from typing import Annotated
 
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field, field_validator
 
 mcp = FastMCP("OrderSupportServer")
-
-# Тестовая база заказов (в рабочей среде соединение открывается только для чтения)
-MOCK_ORDERS_DB = {
-    "ORD-44102": {
-        "customer_id": "CUST-100",
-        "status": "В пути (передан курьеру)",
-        "delivery_window": "10:00 - 14:00",
-        "items_count": 2,
-        "total_rub": 8450,
-    },
-    "ORD-55101": {
-        "customer_id": "CUST-200",
-        "status": "Готов к отгрузке (упакован)",
-        "delivery_window": "Завтра, 12:00 - 18:00",
-        "items_count": 1,
-        "total_rub": 12900,
-    },
-    "ORD-55102": {
-        "customer_id": "CUST-200",
-        "status": "На комплектации на складе",
-        "delivery_window": "Ожидает сборки",
-        "items_count": 4,
-        "total_rub": 34200,
-    },
-    "ORD-60200": {
-        "customer_id": "CUST-300",
-        "status": "Доставлен в пункт выдачи",
-        "delivery_window": "Хранение до 30 октября",
-        "items_count": 2,
-        "total_rub": 64000,
-    },
-    "ORD-99801": {
-        "customer_id": "CUST-777",
-        "status": "Ожидает возврата средств",
-        "delivery_window": "Отменен",
-        "items_count": 5,
-        "total_rub": 145000,
-    },
-}
 
 
 class OrderLookupArgs(BaseModel):
@@ -55,11 +18,13 @@ class OrderLookupArgs(BaseModel):
     @classmethod
     def validate_order_prefix(cls, v: str) -> str:
         cleaned = v.strip().upper()
+
         if not re.match(r"^ORD-\d{4,6}$", cleaned):
             raise ValueError(
                 f"Неверный формат '{v}'. Номер заказа должен состоять из букв 'ORD-' "
                 f"и 4-6 цифр (например, ORD-44102). Исправьте значение и вызовите функцию заново."
             )
+
         return cleaned
 
 
@@ -73,7 +38,8 @@ def get_order_status(
         str, "Служебный идентификатор клиента (подставляется программой)"
     ],
 ) -> dict:
-    # 1. Проверяем правильность написания номера заказа
+
+    # 1. Проверяем формат номера заказа через Pydantic
     try:
         validated = OrderLookupArgs(order_id=order_id)
     except ValueError as e:
@@ -83,16 +49,44 @@ def get_order_status(
             "message_for_model": str(e),
         }
 
-    # 2. Ищем заказ в базе данных
-    order = MOCK_ORDERS_DB.get(validated.order_id)
+    # 2. Подключаемся к SQLite строго в режиме чтения
+    try:
+        conn = sqlite3.connect(
+            "file:orders_mock.db?mode=ro",
+            uri=True
+        )
+        conn.row_factory = sqlite3.Row
+
+        cursor = conn.cursor()
+
+        # 3. Ищем заказ по номеру
+        cursor.execute(
+            "SELECT * FROM orders WHERE order_id = ?",
+            (validated.order_id,)
+        )
+
+        order = cursor.fetchone()
+        conn.close()
+
+    except sqlite3.Error as e:
+        return {
+            "success": False,
+            "error_type": "DATABASE_ERROR",
+            "message_for_model": f"Ошибка при чтении базы данных: {e}",
+        }
+
+    # 4. Проверяем, существует ли заказ
     if not order:
         return {
             "success": False,
             "error_type": "NOT_FOUND",
-            "message_for_model": f"Заказ {validated.order_id} не найден в базе. Уточните номер у клиента.",
+            "message_for_model": (
+                f"Заказ {validated.order_id} не найден в базе. "
+                f"Уточните номер у клиента."
+            ),
         }
 
-    # 3. ПРОВЕРКА ПРАВ ДОСТУПА В КОДЕ (защита от просмотра чужих заказов)
+    # 5. Проверяем права доступа
     if order["customer_id"] != authenticated_customer_id:
         return {
             "success": False,
@@ -103,7 +97,7 @@ def get_order_status(
             ),
         }
 
-    # 4. Возвращаем только разрешенные поля (без служебных идентификаторов базы)
+    # 6. Возвращаем только разрешенные поля
     return {
         "success": True,
         "order_id": validated.order_id,

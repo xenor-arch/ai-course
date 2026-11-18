@@ -10,7 +10,16 @@ async def run_support_agent_via_mcp(
     user_message: str,
     session_customer_id: str,
     max_steps: int = 3,
+    stats: dict | None = None,
 ) -> str:
+
+    if stats is not None:
+        stats.update({
+            "function_calls": {},
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+        })
 
     input_messages = [
         {
@@ -58,11 +67,40 @@ async def run_support_agent_via_mcp(
                 tools=openai_tools,
             )
 
+            # Собираем статистику токенов
+            if stats is not None:
+                usage = response.usage
+
+                if usage:
+                    stats["input_tokens"] += usage.input_tokens
+                    stats["output_tokens"] += usage.output_tokens
+
+                    input_details = getattr(
+                        usage,
+                        "input_tokens_details",
+                        None
+                    )
+
+                    cached = getattr(
+                        input_details,
+                        "cached_tokens",
+                        0
+                    ) or 0
+
+                    stats["cached_tokens"] += cached
+
             # Проверяем, вызвала ли модель какие-либо функции
             tool_calls = [
                 item for item in response.output
                 if item.type == "function_call"
             ]
+
+            # Собираем количество вызовов каждой функции
+            if stats is not None:
+                for call in tool_calls:
+                    stats["function_calls"][call.name] = (
+                        stats["function_calls"].get(call.name, 0) + 1
+                    )
 
             if not tool_calls:
                 return response.output_text
